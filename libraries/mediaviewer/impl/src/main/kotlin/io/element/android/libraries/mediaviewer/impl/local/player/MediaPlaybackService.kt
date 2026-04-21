@@ -40,6 +40,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import timber.log.Timber
 import java.io.ByteArrayOutputStream
 
 @OptIn(UnstableApi::class)
@@ -83,7 +84,6 @@ class MediaPlaybackService : MediaSessionService() {
         val manager = MediaPlaylistManager(
             matrixClientProvider = matrixClientProvider,
             localMediaFactory = localMediaFactory,
-            coroutineScope = scope,
             onPlayableItemsChanged = { updateSkipButtonState() },
         )
         playlistManager = manager
@@ -112,6 +112,13 @@ class MediaPlaybackService : MediaSessionService() {
             }
 
             override fun onMediaMetadataChanged(metadata: MediaMetadata) {
+                Timber.d(
+                    "[ColdStartSwitch] Service.onMediaMetadataChanged title=%s eventIdInExtras=%s currentMediaId=%s currentUri=%s",
+                    metadata.title,
+                    metadata.extras?.getString("eventId"),
+                    player.currentMediaItem?.mediaId,
+                    player.currentMediaItem?.localConfiguration?.uri,
+                )
                 updateSessionActivity(metadata)
                 initializePlaylistFromMetadata(metadata)
                 // If embedded metadata was extracted (has title but no custom sessionId in the metadata EXTRAS),
@@ -123,6 +130,15 @@ class MediaPlaybackService : MediaSessionService() {
                     hasInjectedNotificationMetadata = true
                     scope.launch { injectNotificationMetadataFromExtras(player.currentMediaItem) }
                 }
+            }
+
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                Timber.d(
+                    "[ColdStartSwitch] Service.onMediaItemTransition mediaId=%s uri=%s reason=%d",
+                    mediaItem?.mediaId,
+                    mediaItem?.localConfiguration?.uri,
+                    reason,
+                )
             }
         })
     }

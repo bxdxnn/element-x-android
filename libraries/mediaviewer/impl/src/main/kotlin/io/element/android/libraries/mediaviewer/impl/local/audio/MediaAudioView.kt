@@ -74,6 +74,7 @@ import io.element.android.libraries.mediaviewer.impl.local.player.togglePlay
 import io.element.android.libraries.mediaviewer.impl.local.rememberLocalMediaViewState
 import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.delay
+import timber.log.Timber
 
 @SuppressLint("UnsafeOptInUsageError")
 @Composable
@@ -260,15 +261,25 @@ private fun ServicePlayerMediaAudioView(
         // Sender's avatar for audio notification artwork (not room avatar)
         val senderAvatarUrl = localMedia.info.senderAvatar
         LaunchedEffect(localMedia.uri, isDisplayed, senderAvatarUrl) {
+            Timber.d(
+                "[ColdStartSwitch] AudioView LE fired: eventId=%s uri=%s isDisplayed=%s currentPlayerMediaId=%s currentPlayerUri=%s",
+                playbackContext.eventId?.value,
+                localMedia.uri,
+                isDisplayed,
+                player.currentMediaItem?.mediaId,
+                player.currentMediaItem?.localConfiguration?.uri,
+            )
             if (!isDisplayed) return@LaunchedEffect
             // Step 1: Send bare MediaItem with ONLY extras - let ExoPlayer extract embedded metadata
             // (title/artist/artwork). Service will inject notification metadata after embedded is extracted.
-            val hasValidContext = playbackContext.sessionId.value.isNotEmpty()
-            val extras = if (hasValidContext) {
+            val contextSessionId = playbackContext.sessionId
+            val contextRoomId = playbackContext.roomId
+            val contextEventId = playbackContext.eventId
+            val extras = if (contextSessionId != null && contextRoomId != null && contextEventId != null) {
                 Bundle().apply {
-                    putString("sessionId", playbackContext.sessionId.value)
-                    putString("roomId", playbackContext.roomId.value)
-                    putString("eventId", playbackContext.eventId.value)
+                    putString("sessionId", contextSessionId.value)
+                    putString("roomId", contextRoomId.value)
+                    putString("eventId", contextEventId.value)
                     // Signal that notification metadata should be injected by the service
                     putString("notificationTitle", info?.filename ?: localMedia.info.filename)
                     putString("notificationArtist", info?.senderName ?: localMedia.info.senderName)
@@ -280,7 +291,7 @@ private fun ServicePlayerMediaAudioView(
             // Send minimal MediaItem - no title/artist/artwork so ExoPlayer extracts embedded
             val mediaMetadata = extras?.let { MediaMetadata.Builder().setExtras(it).build() }
                 ?: MediaMetadata.EMPTY
-            val mediaId = if (hasValidContext) playbackContext.eventId.value else localMedia.uri.toString()
+            val mediaId = contextEventId?.value ?: localMedia.uri.toString()
             val mediaItem = MediaItem.Builder()
                 .setMediaId(mediaId)
                 .setUri(localMedia.uri)
@@ -289,11 +300,19 @@ private fun ServicePlayerMediaAudioView(
             if (player.currentMediaItem?.mediaId == mediaId) {
                 // Same item already loaded — don't reset
                 // Sync UI state with actual player state
+                Timber.d("[ColdStartSwitch] AudioView SAME mediaId=%s, no setMediaItem", mediaId)
                 mediaPlayerControllerState = mediaPlayerControllerState.copy(
                     isPlaying = player.isPlaying,
                     isReady = player.playbackState == Player.STATE_READY,
                 )
             } else {
+                Timber.d(
+                    "[ColdStartSwitch] AudioView setMediaItem: new=%s (uri=%s), old=%s (uri=%s)",
+                    mediaId,
+                    localMedia.uri,
+                    player.currentMediaItem?.mediaId,
+                    player.currentMediaItem?.localConfiguration?.uri,
+                )
                 // Set pending playback BEFORE changing media to prevent flicker
                 pendingPlaybackMediaId = mediaId
                 player.setMediaItem(mediaItem)
@@ -431,7 +450,6 @@ private fun ServicePlayerMediaAudioView(
         player.addListener(playerListener)
         onDispose {
             player.removeListener(playerListener)
-            player.release()
         }
     }
 }

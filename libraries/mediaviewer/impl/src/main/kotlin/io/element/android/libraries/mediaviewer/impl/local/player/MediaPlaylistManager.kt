@@ -14,11 +14,8 @@ import io.element.android.libraries.matrix.api.MatrixClientProvider
 import io.element.android.libraries.matrix.api.core.EventId
 import io.element.android.libraries.matrix.api.core.RoomId
 import io.element.android.libraries.matrix.api.core.SessionId
-import io.element.android.libraries.matrix.api.core.UserId
 import io.element.android.libraries.matrix.api.media.MatrixMediaLoader
 import io.element.android.libraries.matrix.api.media.MediaSource
-import io.element.android.libraries.matrix.api.room.CreateTimelineParams
-import io.element.android.libraries.matrix.api.room.JoinedRoom
 import io.element.android.libraries.matrix.api.timeline.MatrixTimelineItem
 import io.element.android.libraries.matrix.api.timeline.Timeline
 import io.element.android.libraries.matrix.api.timeline.item.event.AudioMessageType
@@ -27,10 +24,7 @@ import io.element.android.libraries.matrix.api.timeline.item.event.ProfileDetail
 import io.element.android.libraries.matrix.api.timeline.item.event.VideoMessageType
 import io.element.android.libraries.mediaviewer.api.MediaInfo
 import io.element.android.libraries.mediaviewer.api.local.LocalMediaFactory
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
@@ -39,10 +33,18 @@ import timber.log.Timber
 private const val PAGINATION_TIMEOUT_MS = 10_000L
 private const val ARTWORK_THUMBNAIL_SIZE = 256L
 
+/**
+ * Provides skip-next / skip-previous media lookups for [MediaPlaybackService].
+ *
+ * The playlist does not open or subscribe to any timeline up-front. Skip buttons
+ * are shown by default; a lookup runs lazily when the user triggers skip. If a
+ * lookup hits the end of the room's live timeline in a given direction without
+ * finding anything playable, that direction is cached as "no more" so the
+ * corresponding skip button hides.
+ */
 class MediaPlaylistManager(
     private val matrixClientProvider: MatrixClientProvider,
     private val localMediaFactory: LocalMediaFactory,
-    private val coroutineScope: CoroutineScope,
     private val onPlayableItemsChanged: () -> Unit = {},
 ) {
     data class PlayableItem(
@@ -66,58 +68,123 @@ class MediaPlaylistManager(
     var currentEventId: EventId? = null
         private set
 
-    private var room: JoinedRoom? = null
-    private var timeline: Timeline? = null
-    private var mediaLoader: MatrixMediaLoader? = null
-    private var playableItems: List<PlayableItem> = emptyList()
-    private var collectionJob: Job? = null
+    // Once a skip lookup exhausts the live timeline in a given direction, cache
+    // that so the corresponding button disappears instead of popping again.
+    private var hasNoNext: Boolean = false
+    private var hasNoPrevious: Boolean = false
 
+    /** Shown by default. Only false after we've verified there is no next playable. */
     val hasNext: Boolean
-        get() {
-            val eventId = currentEventId ?: return false
-            val index = playableItems.indexOfFirst { it.eventId == eventId }
-            return index >= 0 && index < playableItems.size - 1
-        }
+        get() = currentEventId != null && !hasNoNext
 
+    /** Shown by default. Only false after we've verified there is no previous playable. */
     val hasPrevious: Boolean
-        get() {
-            val eventId = currentEventId ?: return false
-            val index = playableItems.indexOfFirst { it.eventId == eventId }
-            return index > 0
-        }
+        get() = currentEventId != null && !hasNoPrevious
 
     fun initialize(sessionId: SessionId, roomId: RoomId, eventId: EventId) {
-        if (sessionId == currentSessionId && roomId == currentRoomId) {
-            currentEventId = eventId
+        Timber.d(
+            "[ColdStartSwitch] PlaylistManager.initialize sessionId=%s roomId=%s eventId=%s (current eventId=%s)",
+            sessionId.value,
+            roomId.value,
+            eventId.value,
+            currentEventId?.value,
+        )
+        if (sessionId == currentSessionId && roomId == currentRoomId && eventId == currentEventId) {
             return
         }
-        release()
         currentSessionId = sessionId
         currentRoomId = roomId
         currentEventId = eventId
+        // A new anchor event may have different neighbours — clear the "no more" caches.
+        hasNoNext = false
+        hasNoPrevious = false
+        onPlayableItemsChanged()
+    }
 
-        collectionJob = coroutineScope.launch {
-            try {
-                val client = matrixClientProvider.getOrRestore(sessionId).getOrNull() ?: return@launch
-                mediaLoader = client.matrixMediaLoader
-                val joinedRoom = client.getJoinedRoom(roomId) ?: return@launch
-                room = joinedRoom
+    suspend fun skipToNext(): SkipResult? = skipMutex.withLock {
+        Timber.d("[ColdStartSwitch] PlaylistManager.skipToNext from eventId=%s", currentEventId?.value)
+        skipLazy(forward = true)
+    }
 
-                val mediaTimeline = joinedRoom.createTimeline(
-                    CreateTimelineParams.MediaOnlyFocused(eventId)
-                ).getOrNull() ?: return@launch
-                timeline = mediaTimeline
+    suspend fun skipToPrevious(): SkipResult? = skipMutex.withLock {
+        Timber.d("[ColdStartSwitch] PlaylistManager.skipToPrevious from eventId=%s", currentEventId?.value)
+        skipLazy(forward = false)
+    }
 
-                mediaTimeline.timelineItems.collect { items ->
-                    playableItems = items
-                        .filterIsInstance<MatrixTimelineItem.Event>()
-                        .mapNotNull { toPlayableItem(it) }
-                    onPlayableItemsChanged()
-                }
-            } catch (e: Exception) {
-                Timber.e(e, "Failed to initialize media playlist")
-            }
+    private suspend fun skipLazy(forward: Boolean): SkipResult? {
+        val sessionId = currentSessionId ?: return null
+        val roomId = currentRoomId ?: return null
+        val anchorEventId = currentEventId ?: return null
+
+        val client = matrixClientProvider.getOrRestore(sessionId).getOrNull() ?: return null
+        val joinedRoom = client.getJoinedRoom(roomId) ?: return null
+        val mediaLoader = client.matrixMediaLoader
+        val timeline = joinedRoom.liveTimeline
+
+        val items = timeline.timelineItems.first()
+        findNeighbour(items, anchorEventId, forward)?.let { target ->
+            return completeSkip(target, mediaLoader)
         }
+
+        // Not present in the current live timeline snapshot — try one pagination step.
+        val direction = if (forward) Timeline.PaginationDirection.FORWARDS else Timeline.PaginationDirection.BACKWARDS
+        val status = if (forward) timeline.forwardPaginationStatus.value else timeline.backwardPaginationStatus.value
+        if (!status.hasMoreToLoad) {
+            markEndReached(forward)
+            return null
+        }
+
+        timeline.paginate(direction)
+        val target = waitForNeighbour(timeline, anchorEventId, forward)
+        if (target == null) {
+            markEndReached(forward)
+            return null
+        }
+        return completeSkip(target, mediaLoader)
+    }
+
+    private fun findNeighbour(
+        items: List<MatrixTimelineItem>,
+        anchorEventId: EventId,
+        forward: Boolean,
+    ): PlayableItem? {
+        val playable = items
+            .filterIsInstance<MatrixTimelineItem.Event>()
+            .mapNotNull { toPlayableItem(it) }
+        val idx = playable.indexOfFirst { it.eventId == anchorEventId }
+        if (idx < 0) return null
+        val targetIdx = if (forward) idx + 1 else idx - 1
+        return playable.getOrNull(targetIdx)
+    }
+
+    private suspend fun waitForNeighbour(
+        timeline: Timeline,
+        anchorEventId: EventId,
+        forward: Boolean,
+    ): PlayableItem? = withTimeoutOrNull(PAGINATION_TIMEOUT_MS) {
+        timeline.timelineItems.first { newItems ->
+            findNeighbour(newItems, anchorEventId, forward) != null
+        }.let { emittedItems ->
+            findNeighbour(emittedItems, anchorEventId, forward)
+        }
+    }
+
+    private suspend fun completeSkip(
+        target: PlayableItem,
+        mediaLoader: MatrixMediaLoader,
+    ): SkipResult? {
+        val result = buildSkipResult(target, mediaLoader) ?: return null
+        currentEventId = result.eventId
+        // Moved to a new anchor; neighbour lookups can succeed again.
+        hasNoNext = false
+        hasNoPrevious = false
+        onPlayableItemsChanged()
+        return result
+    }
+
+    private fun markEndReached(forward: Boolean) {
+        if (forward) hasNoNext = true else hasNoPrevious = true
+        onPlayableItemsChanged()
     }
 
     private fun toPlayableItem(item: MatrixTimelineItem.Event): PlayableItem? {
@@ -149,74 +216,7 @@ class MediaPlaylistManager(
         }
     }
 
-    suspend fun skipToNext(): SkipResult? = skipMutex.withLock {
-        val eventId = currentEventId ?: return null
-        val currentIndex = playableItems.indexOfFirst { it.eventId == eventId }
-        if (currentIndex < 0) return null
-
-        val nextIndex = currentIndex + 1
-        if (nextIndex < playableItems.size) {
-            return buildSkipResult(playableItems[nextIndex])
-        }
-
-        // Try paginating forward for more items
-        val tl = timeline ?: return null
-        if (tl.forwardPaginationStatus.value.hasMoreToLoad) {
-            tl.paginate(Timeline.PaginationDirection.FORWARDS)
-            val newItems = waitForNewPlayableItems(currentIndex, forward = true) ?: return null
-            return buildSkipResult(newItems)
-        }
-        return null
-    }
-
-    suspend fun skipToPrevious(): SkipResult? = skipMutex.withLock {
-        val eventId = currentEventId ?: return null
-        val currentIndex = playableItems.indexOfFirst { it.eventId == eventId }
-        if (currentIndex < 0) return null
-
-        val prevIndex = currentIndex - 1
-        if (prevIndex >= 0) {
-            return buildSkipResult(playableItems[prevIndex])
-        }
-
-        // Try paginating backward for more items
-        val tl = timeline ?: return null
-        if (tl.backwardPaginationStatus.value.hasMoreToLoad) {
-            tl.paginate(Timeline.PaginationDirection.BACKWARDS)
-            val newItem = waitForNewPlayableItems(currentIndex, forward = false) ?: return null
-            return buildSkipResult(newItem)
-        }
-        return null
-    }
-
-    private suspend fun waitForNewPlayableItems(currentIndex: Int, forward: Boolean): PlayableItem? {
-        val tl = timeline ?: return null
-        return withTimeoutOrNull(PAGINATION_TIMEOUT_MS) {
-            tl.timelineItems.first { items ->
-                val newPlayable = items
-                    .filterIsInstance<MatrixTimelineItem.Event>()
-                    .mapNotNull { toPlayableItem(it) }
-                if (forward) {
-                    newPlayable.size > playableItems.size &&
-                        newPlayable.getOrNull(currentIndex + 1) != null
-                } else {
-                    newPlayable.size > playableItems.size
-                }
-            }
-            // After flow emitted, playableItems should be updated by the collection job
-            val eventId = currentEventId ?: return@withTimeoutOrNull null
-            val newIndex = playableItems.indexOfFirst { it.eventId == eventId }
-            if (newIndex < 0) return@withTimeoutOrNull null
-            if (forward) {
-                playableItems.getOrNull(newIndex + 1)
-            } else {
-                playableItems.getOrNull(newIndex - 1)
-            }
-        }
-    }
-
-    private suspend fun buildSkipResult(item: PlayableItem): SkipResult? {
-        val loader = mediaLoader ?: return null
+    private suspend fun buildSkipResult(item: PlayableItem, loader: MatrixMediaLoader): SkipResult? {
         return try {
             val mediaFile = loader.downloadMediaFile(
                 source = item.mediaSource,
@@ -241,7 +241,6 @@ class MediaPlaylistManager(
             )
             val localMedia = localMediaFactory.createFromMediaFile(mediaFile, mediaInfo)
 
-            // Download artwork for the notification
             val artworkSource = item.thumbnailSource
                 ?: item.senderAvatar?.let { MediaSource(it) }
             val artworkBytes = artworkSource?.let { source ->
@@ -269,7 +268,6 @@ class MediaPlaylistManager(
                 .setMediaMetadata(metadata)
                 .build()
 
-            currentEventId = item.eventId
             SkipResult(mediaItem = mediaItem, eventId = item.eventId)
         } catch (e: Exception) {
             Timber.e(e, "Failed to download media for skip")
@@ -278,15 +276,10 @@ class MediaPlaylistManager(
     }
 
     fun release() {
-        collectionJob?.cancel()
-        collectionJob = null
-        timeline?.close()
-        timeline = null
-        room = null
-        mediaLoader = null
-        playableItems = emptyList()
         currentSessionId = null
         currentRoomId = null
         currentEventId = null
+        hasNoNext = false
+        hasNoPrevious = false
     }
 }

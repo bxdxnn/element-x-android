@@ -193,15 +193,25 @@ private fun ServicePlayerMediaVideoView(
     // Use localMedia.uri and isDisplayed as keys - ensures metadata loads when page becomes visible after settling
     if (localMedia?.uri != null) {
         LaunchedEffect(localMedia.uri, isDisplayed, thumbnailSource) {
+            Timber.d(
+                "[ColdStartSwitch] VideoView LE fired: eventId=%s uri=%s isDisplayed=%s currentPlayerMediaId=%s currentPlayerUri=%s",
+                playbackContext.eventId?.value,
+                localMedia.uri,
+                isDisplayed,
+                player.currentMediaItem?.mediaId,
+                player.currentMediaItem?.localConfiguration?.uri,
+            )
             if (!isDisplayed) return@LaunchedEffect
             // Step 1: Send bare MediaItem with ONLY extras - let ExoPlayer extract embedded metadata
             // (title/artist/artwork). Service will inject notification metadata after embedded is extracted.
-            val hasValidContext = playbackContext.sessionId.value.isNotEmpty()
-            val extras = if (hasValidContext) {
+            val contextSessionId = playbackContext.sessionId
+            val contextRoomId = playbackContext.roomId
+            val contextEventId = playbackContext.eventId
+            val extras = if (contextSessionId != null && contextRoomId != null && contextEventId != null) {
                 Bundle().apply {
-                    putString("sessionId", playbackContext.sessionId.value)
-                    putString("roomId", playbackContext.roomId.value)
-                    putString("eventId", playbackContext.eventId.value)
+                    putString("sessionId", contextSessionId.value)
+                    putString("roomId", contextRoomId.value)
+                    putString("eventId", contextEventId.value)
                     // Signal that notification metadata should be injected by the service
                     putString("notificationTitle", localMedia.info.filename)
                     putString("notificationArtist", localMedia.info.senderName)
@@ -214,7 +224,7 @@ private fun ServicePlayerMediaVideoView(
             // Send minimal MediaItem - no title/artist/artwork so ExoPlayer extracts embedded
             val mediaMetadata = extras?.let { MediaMetadata.Builder().setExtras(it).build() }
                 ?: MediaMetadata.EMPTY
-            val mediaId = if (hasValidContext) playbackContext.eventId.value else localMedia.uri.toString()
+            val mediaId = contextEventId?.value ?: localMedia.uri.toString()
             val mediaItem = MediaItem.Builder()
                 .setMediaId(mediaId)
                 .setUri(localMedia.uri)
@@ -222,12 +232,20 @@ private fun ServicePlayerMediaVideoView(
                 .build()
             if (player.currentMediaItem?.mediaId == mediaId) {
                 // Same item already loaded — don't reset
+                Timber.d("[ColdStartSwitch] VideoView SAME mediaId=%s, no setMediaItem", mediaId)
                 // Sync UI state with actual player state
                 mediaPlayerControllerState = mediaPlayerControllerState.copy(
                     isPlaying = player.isPlaying,
                     isReady = player.playbackState == Player.STATE_READY,
                 )
             } else {
+                Timber.d(
+                    "[ColdStartSwitch] VideoView setMediaItem: new=%s (uri=%s), old=%s (uri=%s)",
+                    mediaId,
+                    localMedia.uri,
+                    player.currentMediaItem?.mediaId,
+                    player.currentMediaItem?.localConfiguration?.uri,
+                )
                 // Set pending playback BEFORE changing media to prevent flicker
                 pendingPlaybackMediaId = mediaId
                 player.setMediaItem(mediaItem)

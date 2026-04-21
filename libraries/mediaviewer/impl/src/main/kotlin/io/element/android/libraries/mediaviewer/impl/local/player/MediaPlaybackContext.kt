@@ -14,9 +14,9 @@ import io.element.android.libraries.matrix.api.core.SessionId
 import io.element.android.libraries.matrix.api.media.MediaSource
 
 data class MediaPlaybackContext(
-    val sessionId: SessionId = SessionId(""),
-    val roomId: RoomId = RoomId(""),
-    val eventId: EventId = EventId(""),
+    val sessionId: SessionId? = null,
+    val roomId: RoomId? = null,
+    val eventId: EventId? = null,
     val thumbnailSource: MediaSource? = null,
 )
 

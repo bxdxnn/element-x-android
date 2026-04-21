@@ -21,7 +21,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.pager.HorizontalPager
@@ -79,7 +78,6 @@ import io.element.android.libraries.designsystem.theme.components.TopAppBar
 import io.element.android.libraries.designsystem.utils.hasCompactHeightWindowSize
 import io.element.android.libraries.designsystem.utils.snackbar.SnackbarHost
 import io.element.android.libraries.designsystem.utils.snackbar.rememberSnackbarHostState
-import io.element.android.libraries.matrix.api.core.EventId
 import io.element.android.libraries.matrix.api.media.MediaSource
 import io.element.android.libraries.matrix.ui.media.MediaRequestData
 import io.element.android.libraries.mediaviewer.api.MediaInfo
@@ -99,6 +97,7 @@ import kotlinx.coroutines.delay
 import me.saket.telephoto.zoomable.OverzoomEffect
 import me.saket.telephoto.zoomable.ZoomSpec
 import me.saket.telephoto.zoomable.rememberZoomableState
+import timber.log.Timber
 
 val topAppBarHeight = 88.dp
 
@@ -156,7 +155,7 @@ fun MediaViewerView(
                         LocalMediaPlaybackContext provides MediaPlaybackContext(
                             sessionId = state.sessionId,
                             roomId = state.roomId,
-                            eventId = dataForPage.eventId ?: EventId(""),
+                            eventId = dataForPage.eventId,
                             thumbnailSource = dataForPage.thumbnailSource,
                         )
                     ) {
@@ -165,6 +164,14 @@ fun MediaViewerView(
                         ) {
                             val isSettledPage = page == pagerState.settledPage
                             LaunchedEffect(isSettledPage) {
+                                Timber.d(
+                                    "[ColdStartSwitch] page=%d settledPage=%d isSettledPage=%s eventId=%s listSize=%d",
+                                    page,
+                                    pagerState.settledPage,
+                                    isSettledPage,
+                                    dataForPage.eventId?.value,
+                                    state.listData.size,
+                                )
                                 if (isSettledPage) {
                                     state.eventSink(MediaViewerEvents.LoadMedia(dataForPage))
                                 }

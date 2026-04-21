@@ -176,14 +176,24 @@ class MediaViewerDataSource(
     }
 
     suspend fun loadMedia(data: MediaViewerPageData.MediaViewerData) {
-        Timber.d("loadMedia for ${data.eventId}")
+        Timber.d(
+            "[ColdStartSwitch] loadMedia for eventId=%s safeUrl=%s",
+            data.eventId?.value,
+            data.mediaSource.safeUrl,
+        )
         val localMediaState = localMediaStates.getOrPut(data.mediaSource.safeUrl) {
             mutableStateOf(AsyncData.Uninitialized)
         }
         // Skip if already successfully downloaded or already loading
         when (localMediaState.value) {
-            is AsyncData.Success -> return
-            is AsyncData.Loading -> return
+            is AsyncData.Success -> {
+                Timber.d("[ColdStartSwitch] loadMedia skip: already Success for safeUrl=%s", data.mediaSource.safeUrl)
+                return
+            }
+            is AsyncData.Loading -> {
+                Timber.d("[ColdStartSwitch] loadMedia skip: already Loading for safeUrl=%s", data.mediaSource.safeUrl)
+                return
+            }
             else -> Unit
         }
         localMediaState.value = AsyncData.Loading()
@@ -203,6 +213,11 @@ class MediaViewerDataSource(
                 )
             }
             .onSuccess {
+                Timber.d(
+                    "[ColdStartSwitch] loadMedia DONE eventId=%s safeUrl=%s — shared MutableState now Success for every page that shares this URL",
+                    data.eventId?.value,
+                    data.mediaSource.safeUrl,
+                )
                 localMediaState.value = AsyncData.Success(it)
             }
             .onFailure {

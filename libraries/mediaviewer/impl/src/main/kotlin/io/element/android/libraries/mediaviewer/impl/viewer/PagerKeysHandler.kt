@@ -11,6 +11,7 @@ package io.element.android.libraries.mediaviewer.impl.viewer
 import dev.zacsweers.metro.Inject
 import io.element.android.libraries.mediaviewer.impl.model.MediaItem
 import io.element.android.libraries.mediaviewer.impl.model.eventId
+import java.util.IdentityHashMap
 
 /**
  * x and y are loading items.
@@ -41,14 +42,19 @@ class PagerKeysHandler {
     private data class Data(
         val mediaItems: List<MediaItem>,
         val keyOffset: Long,
+        // Reference-identity index lookup: two MediaItem instances that are .equals
+        // (e.g. the Rust SDK occasionally emits the same event twice during pagination)
+        // would otherwise collapse to the same indexOf result and produce duplicate
+        // pager keys, crashing HorizontalPager.
+        val indexByIdentity: IdentityHashMap<MediaItem, Int>,
     )
 
     // Will store the list of media items and the key offset of the first item in the list
-    private var cachedData: Data = Data(emptyList(), 0)
+    private var cachedData: Data = Data(emptyList(), 0, IdentityHashMap())
 
     fun accept(mediaItems: List<MediaItem>) {
-        if (cachedData.mediaItems.isEmpty()) {
-            cachedData = Data(mediaItems, 0)
+        val newOffset = if (cachedData.mediaItems.isEmpty()) {
+            0L
         } else {
             // Search a common item in both lists, i.e. an item with the same eventId
             val itemInCacheIndex = cachedData.mediaItems.indexOfFirst { mediaItem ->
@@ -56,15 +62,15 @@ class PagerKeysHandler {
                     .filterIsInstance<MediaItem.Event>()
                     .any { mediaItem.eventId() == it.eventId() }
             }
-            cachedData = if (itemInCacheIndex == -1) {
+            if (itemInCacheIndex == -1) {
                 // If the item is not found, start with a new cache
-                Data(mediaItems, 0)
+                0L
             } else {
                 val cachedItem = cachedData.mediaItems[itemInCacheIndex]
                 val eventId = (cachedItem as? MediaItem.Event)?.eventId()
                 if (eventId == null) {
                     // Should not happen, but in this case, start with a new cache
-                    Data(mediaItems, 0)
+                    0L
                 } else {
                     // Search the index of the item in the new list
                     val itemIndex = mediaItems.indexOfFirst { mediaItem ->
@@ -72,17 +78,22 @@ class PagerKeysHandler {
                     }
                     if (itemIndex == -1) {
                         // If the item is not found, start with a new cache
-                        Data(mediaItems, 0)
+                        0L
                     } else {
                         // Update the cache with the new list and the new offset
-                        Data(mediaItems, cachedData.keyOffset + itemInCacheIndex - itemIndex.toLong())
+                        cachedData.keyOffset + itemInCacheIndex - itemIndex.toLong()
                     }
                 }
             }
         }
+        val indexByIdentity = IdentityHashMap<MediaItem, Int>(mediaItems.size).apply {
+            mediaItems.forEachIndexed { index, item -> put(item, index) }
+        }
+        cachedData = Data(mediaItems, newOffset, indexByIdentity)
     }
 
     fun getKey(mediaItem: MediaItem): Long {
-        return cachedData.mediaItems.indexOf(mediaItem) + cachedData.keyOffset
+        val index = cachedData.indexByIdentity[mediaItem] ?: cachedData.mediaItems.indexOf(mediaItem)
+        return index + cachedData.keyOffset
     }
 }

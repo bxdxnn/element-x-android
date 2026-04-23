@@ -59,6 +59,8 @@ import me.saket.telephoto.zoomable.zoomable
 import timber.log.Timber
 import kotlin.time.Duration.Companion.seconds
 
+private const val SETTLE_DELAY_MS = 100L
+
 @SuppressLint("UnsafeOptInUsageError")
 @Composable
 fun MediaVideoView(
@@ -193,15 +195,13 @@ private fun ServicePlayerMediaVideoView(
     // Use localMedia.uri and isDisplayed as keys - ensures metadata loads when page becomes visible after settling
     if (localMedia?.uri != null) {
         LaunchedEffect(localMedia.uri, isDisplayed, thumbnailSource) {
-            Timber.d(
-                "[ColdStartSwitch] VideoView LE fired: eventId=%s uri=%s isDisplayed=%s currentPlayerMediaId=%s currentPlayerUri=%s",
-                playbackContext.eventId?.value,
-                localMedia.uri,
-                isDisplayed,
-                player.currentMediaItem?.mediaId,
-                player.currentMediaItem?.localConfiguration?.uri,
-            )
             if (!isDisplayed) return@LaunchedEffect
+            // During backward pagination, the timeline list mutates one composition frame
+            // before pagerState.settledPage updates. In that window a neighbour page can
+            // briefly evaluate as settled and try to claim the shared player. Wait one
+            // settle window: if isDisplayed flips back to false, this LaunchedEffect is
+            // cancelled and setMediaItem never fires.
+            delay(SETTLE_DELAY_MS)
             // Step 1: Send bare MediaItem with ONLY extras - let ExoPlayer extract embedded metadata
             // (title/artist/artwork). Service will inject notification metadata after embedded is extracted.
             val contextSessionId = playbackContext.sessionId
@@ -231,21 +231,12 @@ private fun ServicePlayerMediaVideoView(
                 .setMediaMetadata(mediaMetadata)
                 .build()
             if (player.currentMediaItem?.mediaId == mediaId) {
-                // Same item already loaded — don't reset
-                Timber.d("[ColdStartSwitch] VideoView SAME mediaId=%s, no setMediaItem", mediaId)
-                // Sync UI state with actual player state
+                // Same item already loaded — sync UI state without resetting playback
                 mediaPlayerControllerState = mediaPlayerControllerState.copy(
                     isPlaying = player.isPlaying,
                     isReady = player.playbackState == Player.STATE_READY,
                 )
             } else {
-                Timber.d(
-                    "[ColdStartSwitch] VideoView setMediaItem: new=%s (uri=%s), old=%s (uri=%s)",
-                    mediaId,
-                    localMedia.uri,
-                    player.currentMediaItem?.mediaId,
-                    player.currentMediaItem?.localConfiguration?.uri,
-                )
                 // Set pending playback BEFORE changing media to prevent flicker
                 pendingPlaybackMediaId = mediaId
                 player.setMediaItem(mediaItem)

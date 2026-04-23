@@ -38,7 +38,6 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
-import timber.log.Timber
 
 class MediaViewerDataSource(
     mode: MediaViewerMode,
@@ -176,24 +175,13 @@ class MediaViewerDataSource(
     }
 
     suspend fun loadMedia(data: MediaViewerPageData.MediaViewerData) {
-        Timber.d(
-            "[ColdStartSwitch] loadMedia for eventId=%s safeUrl=%s",
-            data.eventId?.value,
-            data.mediaSource.safeUrl,
-        )
         val localMediaState = localMediaStates.getOrPut(data.mediaSource.safeUrl) {
             mutableStateOf(AsyncData.Uninitialized)
         }
         // Skip if already successfully downloaded or already loading
         when (localMediaState.value) {
-            is AsyncData.Success -> {
-                Timber.d("[ColdStartSwitch] loadMedia skip: already Success for safeUrl=%s", data.mediaSource.safeUrl)
-                return
-            }
-            is AsyncData.Loading -> {
-                Timber.d("[ColdStartSwitch] loadMedia skip: already Loading for safeUrl=%s", data.mediaSource.safeUrl)
-                return
-            }
+            is AsyncData.Success,
+            is AsyncData.Loading -> return
             else -> Unit
         }
         localMediaState.value = AsyncData.Loading()
@@ -213,11 +201,6 @@ class MediaViewerDataSource(
                 )
             }
             .onSuccess {
-                Timber.d(
-                    "[ColdStartSwitch] loadMedia DONE eventId=%s safeUrl=%s — shared MutableState now Success for every page that shares this URL",
-                    data.eventId?.value,
-                    data.mediaSource.safeUrl,
-                )
                 localMediaState.value = AsyncData.Success(it)
             }
             .onFailure {

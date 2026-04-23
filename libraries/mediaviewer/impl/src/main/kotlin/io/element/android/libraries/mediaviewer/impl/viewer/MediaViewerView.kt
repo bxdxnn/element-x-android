@@ -97,7 +97,6 @@ import kotlinx.coroutines.delay
 import me.saket.telephoto.zoomable.OverzoomEffect
 import me.saket.telephoto.zoomable.ZoomSpec
 import me.saket.telephoto.zoomable.rememberZoomableState
-import timber.log.Timber
 
 val topAppBarHeight = 88.dp
 
@@ -164,14 +163,6 @@ fun MediaViewerView(
                         ) {
                             val isSettledPage = page == pagerState.settledPage
                             LaunchedEffect(isSettledPage) {
-                                Timber.d(
-                                    "[ColdStartSwitch] page=%d settledPage=%d isSettledPage=%s eventId=%s listSize=%d",
-                                    page,
-                                    pagerState.settledPage,
-                                    isSettledPage,
-                                    dataForPage.eventId?.value,
-                                    state.listData.size,
-                                )
                                 if (isSettledPage) {
                                     state.eventSink(MediaViewerEvents.LoadMedia(dataForPage))
                                 }

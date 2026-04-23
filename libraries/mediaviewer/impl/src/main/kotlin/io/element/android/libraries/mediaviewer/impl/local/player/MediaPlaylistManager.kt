@@ -82,13 +82,6 @@ class MediaPlaylistManager(
         get() = currentEventId != null && !hasNoPrevious
 
     fun initialize(sessionId: SessionId, roomId: RoomId, eventId: EventId) {
-        Timber.d(
-            "[ColdStartSwitch] PlaylistManager.initialize sessionId=%s roomId=%s eventId=%s (current eventId=%s)",
-            sessionId.value,
-            roomId.value,
-            eventId.value,
-            currentEventId?.value,
-        )
         if (sessionId == currentSessionId && roomId == currentRoomId && eventId == currentEventId) {
             return
         }
@@ -102,12 +95,10 @@ class MediaPlaylistManager(
     }
 
     suspend fun skipToNext(): SkipResult? = skipMutex.withLock {
-        Timber.d("[ColdStartSwitch] PlaylistManager.skipToNext from eventId=%s", currentEventId?.value)
         skipLazy(forward = true)
     }
 
     suspend fun skipToPrevious(): SkipResult? = skipMutex.withLock {
-        Timber.d("[ColdStartSwitch] PlaylistManager.skipToPrevious from eventId=%s", currentEventId?.value)
         skipLazy(forward = false)
     }
 
